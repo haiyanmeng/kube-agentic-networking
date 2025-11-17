@@ -441,7 +441,7 @@ metadata:
 spec:
   # AccessPolicy targets a single Backend.
   targetRefs:
-  - group: gateway.networking.x-k8s.io
+  - group: agentic.networking.x-k8s.io
     kind: Backend
     name: mcp-server1
   rules:
@@ -498,7 +498,7 @@ metadata:
   name: access-policy-server2
 spec:
   targetRefs:
-  - group: gateway.networking.x-k8s.io
+  - group: agentic.networking.x-k8s.io
     kind: Backend
     name: mcp-server2
   rules:
@@ -557,7 +557,7 @@ metadata:
   name: auth-scheme-server1
 spec:
   targetRefs:
-  - group: gateway.networking.x-k8s.io
+  - group: agentic.networking.x-k8s.io
     kind: Backend
     name: mcp-server1
   rules:
@@ -573,7 +573,7 @@ metadata:
   name: auth-scheme-server2
 spec:
   targetRefs:
-  - group: gateway.networking.x-k8s.io
+  - group: agentic.networking.x-k8s.io
     kind: Backend
     name: mcp-server2
   rules:
@@ -670,10 +670,10 @@ metadata:
   name: auth-scheme-server
 spec:
   targetRefs:
-  - group: gateway.networking.x-k8s.io
+  - group: agentic.networking.x-k8s.io
     kind: Backend
     name: mcp-server1
-  - group: gateway.networking.x-k8s.io
+  - group: agentic.networking.x-k8s.io
     kind: Backend
     name: mcp-server2
   rules:
@@ -685,7 +685,7 @@ spec:
       kubernetes:
         user: identity.user.username
         resourceAttributes: # group, resource, resourceName and namespace could all default to values obtained from the target
-          group: '"gateway.networking.x-k8s.io"'
+          group: '"agentic.networking.x-k8s.io"'
           resource: '"backends"'
           resourceName: request.mcp.server_name
           verb: request.mcp.tool_name
