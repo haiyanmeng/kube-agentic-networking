@@ -22,7 +22,7 @@ The authentication of MCP tool access is not within the scope of this proposal, 
 
 #### Agent Identity
 
-As an AI Engineer, I want to assign a unique, verifiable identity to my agent running in Kubernetes, so that gateways or external systems can securely authenticate it and make authorization decisions.
+As an AI Engineer, I want my agents running in Kubernetes to have unique, verifiable identities assigned, so that gateways or external systems can securely trust these identities and make authorization decisions.
 
 #### Protocol-Aware Authorization for MCP Tools
 
@@ -30,7 +30,10 @@ As an AI Engineer, I want to create authorization policies to specify which indi
 
 # API
 
-The API introduced two new CRDs: Backend for describing a backend in agentic networking and AuthPolicy for describing the authorization policies for backends in agentic networking.
+The API introduces 3 new CRDs:
+- `Backend`: describes a backend in agentic networking
+- `AccessPolicy`: describes who can access what (the permissions/grants) in relation to the agentic networking backends
+- `AuthScheme`: describes the enforcement methodology (identity extraction, verification methods, resource identification)
 
 The CRD names may change depending on the OSS feedback.
 
@@ -119,58 +122,42 @@ type BackendStatus struct {
 }
 ```
 
-## AuthPolicy CRD
+## AccessPolicy CRD
 
-An AuthPolicy resource defines the authorization policies for a Backend resource. Each AuthPolicy includes a targetRef for a Backend resource and a list of rules. Each rule defines the tools from the MCP backend allowed to be accessed by the specified principals (which can be Kubernetes ServiceAccounts or SPIFFE IDs). In the future, we can authorize agent-to-agent, and agent-to-LLM access in the AuthPolicy resource.
+An AccessPolicy resource defines the access control / authorization policies for a Backend resource. Each AccessPolicy includes one or more targetRefs to a Backend resource and a list of rules. Each rule defines the tools from the MCP backend allowed to be accessed by the specified principals (which can be Kubernetes ServiceAccounts or SPIFFE IDs). In the future, we can authorize agent-to-agent and agent-to-LLM access in the AccessPolicy resource.
 
 ```go
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// AuthPolicy is the Schema for the authpolicies API.
-type AuthPolicy struct {
+// AccessPolicy is the Schema for the authpolicies API.
+type AccessPolicy struct {
 	metav1.TypeMeta `json:",inline"`
 	// metadata is a standard object metadata.
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty"`
-	// spec defines the desired state of AuthPolicy.
+	// spec defines the desired state of AccessPolicy.
 	// +required
-	Spec AuthPolicySpec `json:"spec"`
-	// status defines the observed state of AuthPolicy.
+	Spec AccessPolicySpec `json:"spec"`
+	// status defines the observed state of AccessPolicy.
 	// +optional
-	Status AuthPolicyStatus `json:"status,omitempty"`
+	Status AccessPolicyStatus `json:"status,omitempty"`
 }
 
-// AuthPolicySpec defines the desired state of AuthPolicy.
-type AuthPolicySpec struct {
-	// TargetRef specifies the target of the AuthPolicy.
+// AccessPolicySpec defines the desired state of AccessPolicy.
+type AccessPolicySpec struct {
+	// TargetRefs specifies the targets of the AccessPolicy.
 	// Currently, only Backend can be used as a target.
 	// +required
-	TargetRef gwapiv1.LocalPolicyTargetReference `json:"targetRef"`
+	TargetRefs []gwapiv1.LocalPolicyTargetReference `json:"targetRefs"`
 	// Rules defines a list of rules to be applied to the target.
 	// +required
-	Rules []AuthRule `json:"rules"`
-	// Action specifies the action to take when a request matches the rules.
-	// +kubebuilder:validation:Required
-	// +required
-	Action AuthPolicyAction `json:"action"`
+	Rules []AccessRule `json:"rules"`
 }
 
-// AuthPolicyAction specifies the action to take.
-// Currently, the only supported action is ALLOW.
-// +kubebuilder:validation:Enum=ALLOW
-type AuthPolicyAction string
-
-const (
-	// ActionAllow allows requests that match the policy rules.
-	ActionAllow AuthPolicyAction = "ALLOW"
-)
-
-// AuthRule specifies an authorization rule for the targeted backend.
-// When the action is ALLOW,
-//   - requests from Source are permitted to access the listed Tools.
-//   - If the tool list is empty, the rule denies access to all tools from Source.
-type AuthRule struct {
+// AccessRule specifies an authorization rule for the targeted backend.
+// If the tool list is empty, the rule denies access to all tools from Source.
+type AccessRule struct {
 	// Source specifies the source of the request.
 	// +required
 	Source Source `json:"source"`
@@ -239,23 +226,194 @@ type Source struct {
 	ServiceAccounts []string `json:"serviceAccounts,omitempty"`
 }
 
-// AuthPolicyStatus defines the observed state of AuthPolicy.
-type AuthPolicyStatus struct {
-	// For Kubernetes API conventions, see:
-	// https://github.com/kubernetes/community/blob/master/contributors/devel/sig-architecture/api-conventions.md#typical-status-properties
-	// conditions represent the current state of the AuthPolicy resource.
-	// Each condition has a unique type and reflects the status of a specific aspect of the resource.
+// AccessPolicyStatus defines the observed state of AccessPolicy.
+type AccessPolicyStatus struct {
+	// For Policy Status API conventions, see:
+	// https://gateway-api.sigs.k8s.io/geps/gep-713/#the-status-stanza-of-policy-objects
 	//
-	// Standard condition types include:
-	// - "Available": the resource is fully functional
-	// - "Progressing": the resource is being created or updated
-	// - "Degraded": the resource failed to reach or maintain its desired state
+	// Ancestors is a list of ancestor resources (usually Backend) that are
+	// associated with the policy, and the status of the policy with respect to
+	// each ancestor. When this policy attaches to a parent, the controller that
+	// manages the parent and the ancestors MUST add an entry to this list when
+	// the controller first sees the policy and SHOULD update the entry as
+	// appropriate when the relevant ancestor is modified.
 	//
-	// The status of each condition is one of True, False, or Unknown.
-	// +listType=map
-	// +listMapKey=type
+	// Note that choosing the relevant ancestor is left to the Policy designers;
+	// an important part of Policy design is designing the right object level at
+	// which to namespace this status.
+	//
+	// Note also that implementations MUST ONLY populate ancestor status for
+	// the Ancestor resources they are responsible for. Implementations MUST
+	// use the ControllerName field to uniquely identify the entries in this list
+	// that they are responsible for.
+	//
+	// Note that to achieve this, the list of PolicyAncestorStatus structs
+	// MUST be treated as a map with a composite key, made up of the AncestorRef
+	// and ControllerName fields combined.
+	//
+	// A maximum of 16 ancestors will be represented in this list. An empty list
+	// means the Policy is not relevant for any ancestors.
+	//
+	// If this slice is full, implementations MUST NOT add further entries.
+	// Instead they MUST consider the policy unimplementable and signal that
+	// on any related resources such as the ancestor that would be referenced
+	// here.
+	//
+	// +required
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	Ancestors []PolicyAncestorStatus `json:"ancestors"`
+}
+```
+
+## AuthScheme CRD
+
+An AuthScheme resource defines the enforcement methodology for extracting the identity, identifying the requested agentic resource, and verification methods for an agent-to-Backend request. It allows configuring a policy enforcement point (PEP) for enforcing access control policies (permissions) otherwise declared via AccessPolicy resources or others methods.
+
+The AuthScheme API provides language for expressing extraction, trust anchor definitions, and resource identification patterns that allow integrating external authenticators (e.g. OIDC endpoints) and authorizers (Kubernetes RBAC), with a focus on the auth methods rather than the auth data. It can be used in combination or sometimes as an alternative to the AccessPolicy CRD for more advanced use cases and cases where the scale requires offloading auth beyond the limits of a policy resource.
+
+```go
+// +genclient
+// +kubebuilder:object:root=true
+// +kubebuilder:subresource:status
+// AuthScheme is the Schema for the authschemes API.
+type AuthScheme struct {
+	metav1.TypeMeta `json:",inline"`
+	// metadata is a standard object metadata.
 	// +optional
-	Conditions []metav1.Condition `json:"conditions,omitempty"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+	// spec defines the desired state of AuthScheme.
+	// +required
+	Spec AuthSchemeSpec `json:"spec"`
+	// status defines the observed state of AuthScheme.
+	// +optional
+	Status AuthSchemeStatus `json:"status,omitempty"`
+}
+
+// AuthSchemeSpec defines the desired state of AuthScheme.
+type AuthSchemeSpec struct {
+	// TargetRefs specifies the targets of the AuthScheme.
+	// Currently, only Backend can be used as a target.
+	// +required
+	TargetRefs []gwapiv1.LocalPolicyTargetReference `json:"targetRefs"`
+	// Rules defines a list of rules to be applied to the target.
+	// +listType=map
+	// +listMapKey=name
+	// +required
+	Rules []AuthRule `json:"rules"`
+}
+
+// IdentityRuleType defines a type of identity verification rule
+// +kubebuilder:validation:Enum=Kubernetes,OIDC
+type IdentityRuleType string
+
+const (
+	// IdentityRuleKubernetes defines the type of identity verification rule as Kubernetes authentication
+	IdentityRuleKubernetes IdentityRuleType = "Kubernetes"
+	// IdentityRuleOIDC defines the type of identity verification rule as OIDC token issued by a trusted OIDC authentication server
+	IdentityRuleOIDC IdentityRuleType = "OIDC"
+)
+
+// IdentityRule
+type IdentityRule struct {
+	// Type specifies the type of the identity verification scheme
+	// +required
+	Type *IdentityRuleType `json:"type"`
+	// Kubernetes defines a Kubernetes identity verification scheme
+	// It includes fields such as:
+	// - where from in the request to extract a Kubernetes token to verify (default to Authorization header)
+	// - for which audiences the Kubernetes token must be valid
+	// +optional
+	Kubernetes KubernetesIdentityVerification `json:"kubernetes,omitempty"`
+	// OIDC defines an OIDC identity verification scheme
+	// It includes fields such as:
+	// - endpoint of the OIDC server issuer
+	// +optional
+	OIDC OIDCIdentityVerification `json:oidc,omitempty`
+}
+
+// AuthorizationRuleType defines a type of authorization verification rule
+// +kubebuilder:validation:Enum=Kubernetes,CommonExpressionLanguage
+type AuthorizationRuleType string
+
+const (
+	// AuthorizationRuleKubernetesRBAC defines the type of the authorization scheme as Kubernetes authorization
+	AuthorizationRuleKubernetesRBAC AuthorizationRuleType = "Kubernetes"
+	// AuthorizationRuleCEL defines the type of the authorization scheme as Common Expression Language (CEL) expression
+	AuthorizationRuleCEL AuthorizationRuleType = "CommonExpressionLanguage"
+)
+
+// AuthorizationRule
+type AuthorizationRule struct {
+	// Type specifies the type of the authorization scheme
+	Type *AuthorizationRuleType `json:"type"`
+	// Kubernetes defines a scheme for verifying authorization with the Kubernetes authorization system
+	// It includes fields such as:
+	// - what claim from the identity to use as the `user` (e.g.: `identity.username`)
+	// - what claim from the identity to use as the `group` (e.g.: `identity.group`)
+	// - where from in the request to extract the name of the resource (e.g.: `request.body["tool-name"]`)
+	// +optional
+	Kubernetes KubernetesAuthorization `json:"kubernetes,omitempty"`
+	// CEL defines Common Expression Language (CEL) expressions for verifying authorization
+	// E.g.:
+	// - request.body["tool-name"] in identity.authorized_tools
+	// - identity.group == "admin"
+	// +optional
+	CEL CELAuthorization `json:cel,omitempty`
+}
+
+// AuthRule specifies an auth scheme rule for the targeted backend.
+type AuthRule struct {
+	// Name specifies the name of the auth scheme rule
+	// +required
+	Name string `json:name`
+	// Identity specifies the rules for extracting from the request and verifying the identity access token
+	// according to one of the supported identity verification types
+	// +optional
+	Identity IdentityRule `json:"identity,omitempty"`
+	// Authorization specifies the rules for extracting from the request verifying the authorization for the
+	// identity to consume the resource according to one of the supported authorization verification types
+	// +optional
+	Authorization AuthorizationRule `json:"authorization,omitempty"`
+}
+
+// AuthSchemeStatus defines the observed state of AuthScheme.
+type AuthSchemeStatus struct {
+	// For Policy Status API conventions, see:
+	// https://gateway-api.sigs.k8s.io/geps/gep-713/#the-status-stanza-of-policy-objects
+	//
+	// Ancestors is a list of ancestor resources (usually Backend) that are
+	// associated with the policy, and the status of the policy with respect to
+	// each ancestor. When this policy attaches to a parent, the controller that
+	// manages the parent and the ancestors MUST add an entry to this list when
+	// the controller first sees the policy and SHOULD update the entry as
+	// appropriate when the relevant ancestor is modified.
+	//
+	// Note that choosing the relevant ancestor is left to the Policy designers;
+	// an important part of Policy design is designing the right object level at
+	// which to namespace this status.
+	//
+	// Note also that implementations MUST ONLY populate ancestor status for
+	// the Ancestor resources they are responsible for. Implementations MUST
+	// use the ControllerName field to uniquely identify the entries in this list
+	// that they are responsible for.
+	//
+	// Note that to achieve this, the list of PolicyAncestorStatus structs
+	// MUST be treated as a map with a composite key, made up of the AncestorRef
+	// and ControllerName fields combined.
+	//
+	// A maximum of 16 ancestors will be represented in this list. An empty list
+	// means the Policy is not relevant for any ancestors.
+	//
+	// If this slice is full, implementations MUST NOT add further entries.
+	// Instead they MUST consider the policy unimplementable and signal that
+	// on any related resources such as the ancestor that would be referenced
+	// here.
+	//
+	// +required
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=16
+	Ancestors []PolicyAncestorStatus `json:"ancestors"`
 }
 ```
 
@@ -267,7 +425,7 @@ Imagine we have two MCP backends: `mcp-server1` running inside a Kubernetes clus
 
 * `mcp-server2` has three tools: `read_wiki_structure`, `read_wiki_contents`, and `ask_question`.
 
-The following example shows how we can utilize AuthPolicy, Backend and HTTPRoute to authorize:
+The following example shows how we can utilize AccessPolicy, Backend and HTTPRoute to authorize:
 
 * `default/sa1` has access to the tool `add` and `subtract` provided by `mcp-server1`;
 
@@ -277,16 +435,15 @@ The following example shows how we can utilize AuthPolicy, Backend and HTTPRoute
 
 ```yaml
 apiVersion: agentic.networking.x-k8s.io/v1alpha1
-kind: AuthPolicy
+kind: AccessPolicy
 metadata:
-  name: auth-policy-server1
+  name: access-policy-server1
 spec:
-  # AuthPolicy targets a single Backend.
-  targetRef:
-    group: gateway.networking.x-k8s.io
+  # AccessPolicy targets a single Backend.
+  targetRefs:
+  - group: agentic.networking.x-k8s.io
     kind: Backend
     name: mcp-server1
-  action: ALLOW
   rules:
   - source:
       serviceAccounts:
@@ -336,15 +493,14 @@ spec:
     path: /mcp
 ---
 apiVersion: agentic.networking.x-k8s.io/v1alpha1
-kind: AuthPolicy
+kind: AccessPolicy
 metadata:
-  name: auth-policy-server2
+  name: access-policy-server2
 spec:
-  targetRef:
-    group: gateway.networking.x-k8s.io
+  targetRefs:
+  - group: agentic.networking.x-k8s.io
     kind: Backend
     name: mcp-server2
-  action: ALLOW
   rules:
   - source:
       serviceAccounts:
@@ -388,11 +544,55 @@ spec:
     path: /mcp
 ```
 
+The following AuthScheme resources show how to enhance auth from the previous example with additional rules:
+
+* Service accounts accessing the `mcp-server1` Backend must present a token issued for the `mcp-server1.cluster.local` audience;
+
+* Agents registered as clients from a trusted OIDC server `auth-server.example.com` can access tools from the `mcp-server2` Backend that are included in an `authorized_tools` JWT claim.
+
+```yaml
+apiVersion: agentic.networking.x-k8s.io/v1alpha1
+kind: AuthScheme
+metadata:
+  name: auth-scheme-server1
+spec:
+  targetRefs:
+  - group: agentic.networking.x-k8s.io
+    kind: Backend
+    name: mcp-server1
+  rules:
+  - identity:
+      type: Kubernetes
+      kubernetes:
+        audiences:
+        - mcp-server1.cluster.local
+---
+apiVersion: agentic.networking.x-k8s.io/v1alpha1
+kind: AuthScheme
+metadata:
+  name: auth-scheme-server2
+spec:
+  targetRefs:
+  - group: agentic.networking.x-k8s.io
+    kind: Backend
+    name: mcp-server2
+  rules:
+  - identity:
+      type: OIDC
+      oidc:
+        issuerUrl: auth-server.example.com
+    authorization:
+      type: CommonExpressionLanguage
+      cel:
+        expressions:
+        - request.mcp.tool_name in identity.authorized_tools
+```
+
 # A note on Envoy-based Implementations
 
-When a [HTTPRouteRule](https://gateway-api.sigs.k8s.io/reference/spec/#httprouterule) has multiple backendRefs. The backendRefs can be translated into the `route.weighted_clusters` field of an Envoy [Route](https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/route/v3/route_components.proto#config-route-v3-route). The AuthPolicy for a Backend resource can be translated into a `typed_per_filter_config` [RBAC filter](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/rbac_filter) for an Envoy cluster under the `route.weighted_clusters` field of the Envoy Route.
+When a [HTTPRouteRule](https://gateway-api.sigs.k8s.io/reference/spec/#httprouterule) has multiple backendRefs. The backendRefs can be translated into the `route.weighted_clusters` field of an Envoy [Route](https://www.envoyproxy.io/docs/envoy/latest/api-v3/config/route/v3/route_components.proto#config-route-v3-route). The AccessPolicy for a Backend resource can be translated into a `typed_per_filter_config` [RBAC filter](https://www.envoyproxy.io/docs/envoy/latest/configuration/http/http_filters/rbac_filter) for an Envoy cluster under the `route.weighted_clusters` field of the Envoy Route.
 
-For example, if a `HTTPRouteRule` refers to two backends: `backend1` and `backend2`, and a separate `AuthPolicy` resource is defined for both backends. Here is an Envoy config demonstrating how `typed_per_filter_config` RBAC filter can be used
+For example, if a `HTTPRouteRule` refers to two backends: `backend1` and `backend2`, and a separate `AccessPolicy` resource is defined for both backends. Here is an Envoy config demonstrating how `typed_per_filter_config` RBAC filter can be used
 to define authorization policies for each backend.
 
 ```
@@ -428,7 +628,7 @@ to define authorization policies for each backend.
                                 rules:
                                   action: ALLOW
                                   policies:
-								    ... # the policies are translated from the AuthPolicy resource for backend1.
+								    ... # the policies are translated from the AccessPolicy resource for backend1.
                         - name: backend2
                           weight: 50
                           typed_per_filter_config:
@@ -438,7 +638,7 @@ to define authorization policies for each backend.
                                 rules:
                                   action: ALLOW
                                   policies:
-								    ... # the policies are translated from the AuthPolicy resource for backend2.
+								    ... # the policies are translated from the AccessPolicy resource for backend2.
             http_filters:
             - name: envoy.filters.http.rbac
               typed_config:
@@ -454,14 +654,43 @@ to define authorization policies for each backend.
     ...
 ```
 
-# Alternative - Backend + Kubernetes RBAC
+# Alternative – offloading authorization decision to the Kubernetes RBAC
 
-One alternative is to use a Kubernetes Role to track the permissions for accessing MCP Backends, and use a Kubernetes RoleBinding
-to grant the permissions defined in a Role to a ServiceAccount.
+One alternative to listing permissions in an AccessPolicy resource that allows offloading the authorization decision
+to the Kubernetes RBAC is to use an AuthScheme with a Kubernetes authorization rule, a Kubernetes Role to track the
+permissions for accessing MCP Backends, and a Kubernetes RoleBinding to grant the permissions defined in a
+Role to a ServiceAccount.
 
-Here are the Roles and RoleBindings for the previous [example](#a-complete-example).
+Here are the AuthScheme, Roles and RoleBindings for the previous [example](#a-complete-example).
 
 ```yaml
+apiVersion: agentic.networking.x-k8s.io/v1alpha1
+kind: AuthScheme
+metadata:
+  name: auth-scheme-server
+spec:
+  targetRefs:
+  - group: agentic.networking.x-k8s.io
+    kind: Backend
+    name: mcp-server1
+  - group: agentic.networking.x-k8s.io
+    kind: Backend
+    name: mcp-server2
+  rules:
+  - identity:
+      type: Kubernetes
+      kubernetes: {}
+    authorization:
+      type: Kubernetes
+      kubernetes:
+        user: identity.user.username
+        resourceAttributes: # group, resource, resourceName and namespace could all default to values obtained from the target
+          group: '"agentic.networking.x-k8s.io"'
+          resource: '"backends"'
+          resourceName: request.mcp.server_name
+          verb: request.mcp.tool_name
+          namespace: '"namespace"'
+---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -532,6 +761,8 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
 ```
 
+An implementation would have to send a [SubjectAccessReview](https://kubernetes.io/docs/reference/kubernetes-api/authorization-resources/subject-access-review-v1/) request to the Kubernetes API to enforce the policy.
+
 # Prior Art
 
 ## Kubernetes NetworkPolicy
@@ -540,7 +771,7 @@ Kubernetes [NetworkPolicies](https://kubernetes.io/docs/concepts/services-networ
 
 ## Kubernetes RBAC
 
-Kubernetes [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) is designed to control access to the **Kubernetes API** (verbs like `get`, `list`, `delete` on resources like `Pods`), but using it to control **application-level** access (like specific tools within an MCP Backend) has significant limitations. It does not natively understand or intercept the subsequent protocol traffic (the MCP tool calls) that happens between your agent and the backend, hence cannot prevent an agent from calling a specific tool *after* it has connected to the backend.
+Kubernetes [RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/) is designed to control access to the **Kubernetes API** (verbs like `get`, `list`, `delete` on resources like `Pods`). Using it to control **application-level** access (like specific tools within an MCP Backend) requires an implementation that understands the protocol (the MCP tool calls) to intercept the traffic that happens between your agent and the backend to check with the cluster's authorization system at every request. Missing that would not automatically prevent an agent from calling non-authorized tool *after* it has connected to a backend.
 
 ## Istio’s AuthorizationPolicy
 
