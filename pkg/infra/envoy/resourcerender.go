@@ -273,10 +273,16 @@ func (r *ResourceManager) renderDeployment() *appsv1.Deployment {
 
 func (r *ResourceManager) renderService() *corev1.Service {
 	ports := []corev1.ServicePort{}
+	seenPorts := make(map[int32]bool)
 	for _, listener := range r.gw.Spec.Listeners {
+		port := int32(listener.Port)
+		if seenPorts[port] {
+			continue
+		}
+		seenPorts[port] = true
 		ports = append(ports, corev1.ServicePort{
 			Name:     string(listener.Name),
-			Port:     int32(listener.Port),
+			Port:     port,
 			Protocol: corev1.ProtocolTCP, // TODO : Support other protocols if needed.
 		})
 	}

@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/tools/cache"
@@ -81,13 +82,6 @@ func (c *Controller) updateGatewayStatus(ctx context.Context, gateway *gatewayv1
 		return nil
 	}
 
-	// Check if the IP is already present in the status to avoid redundant updates.
-	for _, addr := range gateway.Status.Addresses {
-		if addr.Type != nil && *addr.Type == gatewayv1.IPAddressType && addr.Value == ip {
-			return nil
-		}
-	}
-
 	gatewayCopy := gateway.DeepCopy()
 	gatewayCopy.Status.Addresses = []gatewayv1.GatewayStatusAddress{
 		{
@@ -96,11 +90,33 @@ func (c *Controller) updateGatewayStatus(ctx context.Context, gateway *gatewayv1
 		},
 	}
 
+	// Set the "Accepted" condition to True.
+	meta.SetStatusCondition(&gatewayCopy.Status.Conditions, metav1.Condition{
+		Type:               string(gatewayv1.GatewayConditionAccepted),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(gatewayv1.GatewayReasonAccepted),
+		Message:            "Gateway has been accepted by the controller",
+		ObservedGeneration: gateway.Generation,
+	})
+
+	// Set the "Programmed" condition to True.
+	meta.SetStatusCondition(&gatewayCopy.Status.Conditions, metav1.Condition{
+		Type:               string(gatewayv1.GatewayConditionProgrammed),
+		Status:             metav1.ConditionTrue,
+		Reason:             string(gatewayv1.GatewayReasonProgrammed),
+		Message:            "Gateway has been programmed by the controller",
+		ObservedGeneration: gateway.Generation,
+	})
+
+	if reflect.DeepEqual(gateway.Status, gatewayCopy.Status) {
+		return nil
+	}
+
 	_, err := c.gateway.client.GatewayV1().Gateways(gateway.Namespace).UpdateStatus(ctx, gatewayCopy, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("failed to update gateway status: %w", err)
 	}
 
-	klog.V(2).InfoS("Updated gateway status with proxy IP", "gateway", klog.KObj(gateway), "ip", ip)
+	klog.V(2).InfoS("Updated gateway status with proxy IP and conditions", "gateway", klog.KObj(gateway), "ip", ip)
 	return nil
 }

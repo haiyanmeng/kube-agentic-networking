@@ -67,6 +67,10 @@ test-crd: ;$(info $(M)...Running CRD tests.) @ ## Run CRD tests.
 test-e2e: ;$(info $(M)...Running E2E tests.) @ ## Run E2E tests. Requirements: K8s v1.35+, PodCertificateRequest/ClusterTrustBundle enabled, and KAN Controller running with --enable-agentic-identity-signer=true.
 	cd tests && go test -v ./e2e/...
 
+.PHONY: test-conformance
+test-conformance: ;$(info $(M)...Running Conformance tests.) @ ## Run Conformance tests. Requirements: K8s cluster access.
+	cd tests && go test -v -timeout 30m ./conformance/...
+
 
 # Run static analysis.
 .PHONY: verify
