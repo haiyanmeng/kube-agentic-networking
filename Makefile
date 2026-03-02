@@ -77,6 +77,11 @@ test-e2e: ## Run full E2E tests including cluster setup and controller deploymen
 	$(info ...Running full E2E pipeline (setup + test).)
 	./dev/ci/run-e2e.sh
 
+.PHONY: test-conformance
+test-conformance: ;$(info $(M)...Running Conformance tests.) @ ## Run Conformance tests. Requirements: K8s v1.35+, PodCertificateRequest/ClusterTrustBundle enabled, and KAN Controller running with --enable-agentic-identity-signer=true.
+	cd tests && go test -v ./conformance/...
+
+# Run static analysis.
 .PHONY: verify
 verify: ## Run go vet
 	hack/verify-all.sh -v
