@@ -37,7 +37,7 @@ spec:
               iptables -t nat -A OUTPUT -p tcp --dport 10001 -m owner ! --uid-owner 1337 -j REDIRECT --to-ports 10001
       containers:
         - name: adk-agent
-          image: us-central1-docker.pkg.dev/k8s-staging-images/agentic-net/quickstart-adk-agent:main
+          image: docker.io/hmeng/adk-agent-ollama:v3
           imagePullPolicy: Always
           resources:
             limits:
@@ -56,13 +56,20 @@ spec:
             - name: ENVOY_SERVICE
               # This is the address of the Envoy sidecar
               value: "127.0.0.1:10001"
-            - name: HF_MODEL
-              value: "huggingface/deepseek-ai/DeepSeek-R1-0528"
-            - name: HF_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: hf-secret
-                  key: hf-token-key
+            # Huggingface variables - default model usage if variables available
+            # Comment out/replace with Ollama variables below to switch
+            # - name: HF_MODEL
+            #   value: "huggingface/deepseek-ai/DeepSeek-R1-0528"
+            # - name: HF_TOKEN
+            #   valueFrom:
+            #     secretKeyRef:
+            #       name: hf-secret
+            #       key: hf-token-key
+            #Ollama variables - uncomment to use Ollama models
+            - name: OLLAMA_BASE_URL
+              value: "http://192.168.9.1:11434"
+            - name: OLLAMA_MODEL
+              value: "qwen2.5:7b"
         - name: envoy
           image: envoyproxy/envoy:v1.36-latest
           imagePullPolicy: Always
