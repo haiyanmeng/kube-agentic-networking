@@ -37,7 +37,7 @@ spec:
               iptables -t nat -A OUTPUT -p tcp --dport 10001 -m owner ! --uid-owner 1337 -j REDIRECT --to-ports 10001
       containers:
         - name: adk-agent
-          image: us-central1-docker.pkg.dev/k8s-staging-images/agentic-net/quickstart-adk-agent:main
+          image: docker.io/hmeng/adk-agent-gemini:v1
           imagePullPolicy: Always
           resources:
             limits:
@@ -58,11 +58,11 @@ spec:
               value: "127.0.0.1:10001"
             - name: HF_MODEL
               value: "huggingface/deepseek-ai/DeepSeek-R1-0528"
-            - name: HF_TOKEN
+            - name: GOOGLE_API_KEY
               valueFrom:
                 secretKeyRef:
-                  name: hf-secret
-                  key: hf-token-key
+                  name: google-secret
+                  key: google-api-key
         - name: envoy
           image: envoyproxy/envoy:v1.36-latest
           imagePullPolicy: Always

@@ -49,7 +49,7 @@ except Exception as e:
     logger.error(f"Error initializing McpToolset remote_mcp: {e}")
 
 root_agent = LlmAgent(
-    model=LiteLlm(model=hf_model),
+    model="gemini-2.5-flash",
     name="multi_mcp_agent",
     instruction="""You are an AI assistant that interacts with the world primarily
     via the provided MCP tools. When processing a user's prompt, you must use the 

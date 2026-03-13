@@ -70,12 +70,12 @@ check_command kubectl
 check_command go
 check_command envsubst
 
-if [[ -z "${HF_TOKEN:-}" ]]; then
-  error "HF_TOKEN environment variable is not set."
-  echo "  Please export your HuggingFace token before running this script:"
-  echo "    export HF_TOKEN=<your-huggingface-token>"
+if [[ -z "${GOOGLE_API_KEY:-}" ]]; then
+  error "GOOGLE_API_KEY environment variable is not set."
+  echo "  Please export your Google API key before running this script:"
+  echo "    export GOOGLE_API_KEY=<your-google-api-key>"
   echo ""
-  echo "  You need a token with 'Make calls to Inference Providers' permission."
+  echo "  You need a key with 'Make calls to Inference Providers' permission."
   echo "  See: https://huggingface.co/docs/hub/en/security-tokens"
   exit 1
 fi
@@ -213,9 +213,9 @@ deploy_agent() {
   GATEWAY_ADDRESS="${gateway_address}" GATEWAY_SPIFFE_ID="${gateway_spiffe_id}" \
     envsubst < "${SCRIPT_ROOT}/site-src/guides/quickstart/adk-agent/sidecar/sidecar-configs.yaml" | kubectl apply -f -
 
-  # Create HuggingFace secret (idempotent via dry-run).
-  kubectl create secret generic hf-secret -n "${NAMESPACE}" \
-    --from-literal=hf-token-key="${HF_TOKEN}" \
+  # Create a secret (idempotent via dry-run).
+  kubectl create secret generic google-secret -n "${NAMESPACE}" \
+    --from-literal=google-api-key="${GOOGLE_API_KEY}" \
     --dry-run=client -o yaml | kubectl apply -f -
 
   # Deploy agent.
