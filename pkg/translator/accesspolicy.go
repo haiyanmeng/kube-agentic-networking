@@ -206,7 +206,11 @@ func addPolicyToRBACShadowRules(rbacConfig *rbacv3.RBAC, policyName string, poli
 
 func translateInlineToolsToRBACPermission(tools []string) *rbacconfigv3.Permission {
 	if len(tools) == 0 {
-		return nil
+		return &rbacconfigv3.Permission{
+			Rule: &rbacconfigv3.Permission_NotRule{
+				NotRule: buildTooslCallMethodPermission(),
+			},
+		}
 	}
 
 	var toolValueMatchers []*matcherv3.ValueMatcher

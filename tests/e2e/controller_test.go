@@ -145,8 +145,111 @@ func TestControllerE2E(t *testing.T) {
 	}
 	t.Logf("Obtained MCP Session ID: %s", mcpSessionID)
 
-	// 5. Test Phase 1: get-sum allowed, echo denied
-	t.Log("Verifying initial policy (get-sum: OK, echo: DENY)...")
+	// 5. Test Phase 1: No XAccessPolicy, both get-sum and echo should be allowed.
+	t.Log("Verifying initial policy (get-sum: OK, echo: OK)...")
+
+	// get-sum should be successful.
+	assertToolCall(t, "1", mcpSessionID, gatewayIP, "get-sum", `{"a":2,"b":3}`,
+		mcpResponse{
+			StatusCode: 200,
+			Body: respBody{
+				JSONRPC: "2.0",
+				ID:      1,
+				Result: &mcpResult{
+					IsError: false,
+					Content: []mcpContent{
+						{
+							Type: "text",
+							Text: "The sum of 2 and 3 is 5.",
+						},
+					},
+				},
+			},
+		},
+	)
+
+	// echo should be successful.
+	assertToolCall(t, "2", mcpSessionID, gatewayIP, "echo", `{"message":"hello"}`,
+		mcpResponse{
+			StatusCode: 200,
+			Body: respBody{
+				JSONRPC: "2.0",
+				ID:      2,
+				Result: &mcpResult{
+					IsError: false,
+					Content: []mcpContent{
+						{
+							Type: "text",
+							Text: "Echo: hello",
+						},
+					},
+				},
+			},
+		},
+	)
+
+	// Test Phase 2: Add an XAccessPolicy resource with an empty tool allowlist.
+	// This is to test the default-deny behavior.
+	t.Log("Adding an XAccessPolicy with empty tool allowlist...")
+	runKubectl(t, "apply", "-f", "testdata/xaccesspolicy-with-empty-tool-allowlist.yaml")
+
+	// Give some time for xDS propagation
+	t.Log("Waiting for xDS propagation...")
+	time.Sleep(10 * time.Second)
+
+	// Both get-sum and echo should be denied.
+	t.Log("Verifying policy with empty tool list (get-sum: DENY, echo: DENY)...")
+
+	// get-sum should be unsuccessful.
+	assertToolCall(t, "3", mcpSessionID, gatewayIP, "get-sum", `{"a":2,"b":3}`,
+		mcpResponse{
+			StatusCode: 200,
+			Body: respBody{
+				JSONRPC: "2.0",
+				ID:      3,
+				Result: &mcpResult{
+					IsError: true,
+					Content: []mcpContent{
+						{
+							Type: "text",
+							Text: "Access to this tool is forbidden (403).",
+						},
+					},
+				},
+			},
+		},
+	)
+
+	// echo should be unsuccessful.
+	assertToolCall(t, "4", mcpSessionID, gatewayIP, "echo", `{"message":"hello"}`,
+		mcpResponse{
+			StatusCode: 200,
+			Body: respBody{
+				JSONRPC: "2.0",
+				ID:      4,
+				Result: &mcpResult{
+					IsError: true,
+					Content: []mcpContent{
+						{
+							Type: "text",
+							Text: "Access to this tool is forbidden (403).",
+						},
+					},
+				},
+			},
+		},
+	)
+
+	// Update XAccessPolicy resource to include get-sum in the tool allowlist.
+	// get-sum should be allowed, echo should be denied.
+	t.Log("Applying XAccessPolicy allowing get-sum...")
+	runKubectl(t, "apply", "-f", "testdata/xaccesspolicy-allow-get-sum-only.yaml")
+
+	// Give some time for xDS propagation
+	t.Log("Waiting for xDS propagation...")
+	time.Sleep(10 * time.Second)
+
+	t.Log("Verifying updated policy (get-sum: OK, echo: DENY)...")
 
 	// get-sum should be successful.
 	assertToolCall(t, "1", mcpSessionID, gatewayIP, "get-sum", `{"a":2,"b":3}`,
@@ -190,7 +293,7 @@ func TestControllerE2E(t *testing.T) {
 
 	// 6. Update Policy
 	t.Log("Updating XAccessPolicy (swap permissions)...")
-	runKubectl(t, "apply", "-f", "testdata/policy-update.yaml")
+	runKubectl(t, "apply", "-f", "testdata/xaccesspolicy-allow-echo-only.yaml")
 
 	// Give some time for xDS propagation
 	t.Log("Waiting for xDS propagation...")

@@ -80,6 +80,45 @@ func TestTranslateAccessPolicyToRBAC(t *testing.T) {
 			},
 		},
 		{
+			name: "single rule empty tools explicitly denies",
+			accessPolicy: &agenticv0alpha0.XAccessPolicy{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "policy-empty-tools",
+				},
+				Spec: agenticv0alpha0.AccessPolicySpec{
+					Rules: []agenticv0alpha0.AccessRule{
+						{
+							Name: "allow-all-but-deny-tools",
+							Source: agenticv0alpha0.Source{
+								Type: agenticv0alpha0.AuthorizationSourceTypeSPIFFE,
+								SPIFFE: func() *agenticv0alpha0.AuthorizationSourceSPIFFE {
+									s := agenticv0alpha0.AuthorizationSourceSPIFFE("spiffe://example.com/ns/default/sa/default")
+									return &s
+								}(),
+							},
+							Authorization: &agenticv0alpha0.AuthorizationRule{
+								Type:  agenticv0alpha0.AuthorizationRuleTypeInlineTools,
+								Tools: []string{}, // Empty tools list explicitly creates a Not rule to block tool access
+							},
+						},
+					},
+				},
+			},
+			backend: &agenticv0alpha0.XBackend{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: "default",
+					Name:      "backend-empty-tools",
+				},
+			},
+			expectedRules: map[string]expectedRule{
+				"allow-all-but-deny-tools": {
+					principals:  []string{"spiffe://example.com/ns/default/sa/default"},
+					permissions: []string{"!(metadata[\"mcp_proxy\"][\"method\"] == \"tools/call\")"}, // Match permission string for actual explicit tool denial logic
+				},
+			},
+		},
+		{
 			name: "multiple rules",
 			accessPolicy: &agenticv0alpha0.XAccessPolicy{
 				ObjectMeta: metav1.ObjectMeta{
