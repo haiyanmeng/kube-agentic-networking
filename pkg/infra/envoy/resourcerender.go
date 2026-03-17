@@ -18,6 +18,7 @@ package envoy
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"fmt"
 	"sort"
@@ -27,6 +28,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
@@ -65,15 +67,15 @@ type sdsConfigData struct {
 }
 
 // generateEnvoyBootstrapConfig returns an envoy config generated from config data
-func generateEnvoyBootstrapConfig(cluster, id string) (string, error) {
-	if cluster == "" || id == "" {
+func generateEnvoyBootstrapConfig(cluster, id, controlPlaneAddress string) (string, error) {
+	if cluster == "" || id == "" || controlPlaneAddress == "" {
 		return "", fmt.Errorf("missing parameters for envoy config")
 	}
 
 	data := &bootstrapConfigData{
 		Cluster:             cluster,
 		ID:                  id,
-		ControlPlaneAddress: fmt.Sprintf("%s.%s.svc.cluster.local", constants.XDSServerServiceName, constants.AgenticNetSystemNamespace),
+		ControlPlaneAddress: controlPlaneAddress,
 		ControlPlanePort:    15001,
 	}
 
@@ -108,12 +110,51 @@ func generateSdsConfig(tmpl, sdsConfigName, trustDomain string) (string, error) 
 	return buff.String(), nil
 }
 
+func (r *ResourceManager) getLabels() map[string]string {
+	labels := map[string]string{
+		constants.GatewayNameLabel: r.gw.Name,
+	}
+	if r.gw.Spec.Infrastructure != nil {
+		for k, v := range r.gw.Spec.Infrastructure.Labels {
+			labels[string(k)] = string(v)
+		}
+	}
+	return labels
+}
+
+func (r *ResourceManager) getAnnotations() map[string]string {
+	annotations := map[string]string{}
+	if r.gw.Spec.Infrastructure != nil {
+		for k, v := range r.gw.Spec.Infrastructure.Annotations {
+			annotations[string(k)] = string(v)
+		}
+	}
+	if len(annotations) == 0 {
+		return nil
+	}
+	return annotations
+}
+
 // renderConfigMap creates a ConfigMap for envoy bootstrap config and SDS configs.
-func (r *ResourceManager) renderConfigMap() (*corev1.ConfigMap, error) {
+func (r *ResourceManager) renderConfigMap(ctx context.Context) (*corev1.ConfigMap, error) {
+	// Fetch ClusterIP of agentic-net-xds-server to avoid DNS resolution issues in tests.
+	var controlPlaneAddress string
+	svc, err := r.client.CoreV1().Services(constants.AgenticNetSystemNamespace).Get(ctx, constants.XDSServerServiceName, metav1.GetOptions{})
+	if err != nil {
+		klog.V(2).Infof("failed to get xds server service, fallback to FQDN: %v", err)
+		controlPlaneAddress = fmt.Sprintf("%s.%s.svc.cluster.local", constants.XDSServerServiceName, constants.AgenticNetSystemNamespace)
+	} else {
+		controlPlaneAddress = svc.Spec.ClusterIP
+		if controlPlaneAddress == "" {
+			klog.V(2).Infof("xds server service has no ClusterIP, fallback to FQDN")
+			controlPlaneAddress = fmt.Sprintf("%s.%s.svc.cluster.local", constants.XDSServerServiceName, constants.AgenticNetSystemNamespace)
+		}
+	}
+
 	bootstrap, err := generateEnvoyBootstrapConfig(types.NamespacedName{
 		Namespace: r.gw.Namespace,
 		Name:      r.gw.Name,
-	}.String(), r.nodeID)
+	}.String(), r.nodeID, controlPlaneAddress)
 	if err != nil {
 		return nil, err
 	}
@@ -142,15 +183,20 @@ func (r *ResourceManager) renderConfigMap() (*corev1.ConfigMap, error) {
 	}, nil
 }
 
-func (r *ResourceManager) renderDeployment() *appsv1.Deployment {
+func (r *ResourceManager) renderDeployment(configHash string) *appsv1.Deployment {
 	replicas := int32(1)
+	podAnnotations := r.getAnnotations()
+	if podAnnotations == nil {
+		podAnnotations = map[string]string{}
+	}
+	podAnnotations["checksum/config"] = configHash
+
 	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      r.nodeID,
-			Namespace: r.namespace,
-			Labels: map[string]string{
-				constants.GatewayNameLabel: r.gw.Name,
-			},
+			Name:            r.nodeID,
+			Namespace:       r.namespace,
+			Labels:          r.getLabels(),
+			Annotations:     r.getAnnotations(),
 			OwnerReferences: ownerRef(r.gw),
 		},
 		Spec: appsv1.DeploymentSpec{
@@ -162,10 +208,12 @@ func (r *ResourceManager) renderDeployment() *appsv1.Deployment {
 			},
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"app":                      r.nodeID,
-						constants.GatewayNameLabel: r.gw.Name,
-					},
+					Labels: func() map[string]string {
+						l := r.getLabels()
+						l["app"] = r.nodeID
+						return l
+					}(),
+					Annotations: podAnnotations,
 				},
 				Spec: corev1.PodSpec{
 					ServiceAccountName: r.nodeID,
@@ -296,15 +344,14 @@ func (r *ResourceManager) renderService() *corev1.Service {
 
 	return &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      r.nodeID,
-			Namespace: r.namespace,
-			Labels: map[string]string{
-				constants.GatewayNameLabel: r.gw.Name,
-			},
+			Name:            r.nodeID,
+			Namespace:       r.namespace,
+			Labels:          r.getLabels(),
+			Annotations:     r.getAnnotations(),
 			OwnerReferences: ownerRef(r.gw),
 		},
 		Spec: corev1.ServiceSpec{
-			Type: corev1.ServiceTypeClusterIP,
+			Type: corev1.ServiceTypeLoadBalancer,
 			Selector: map[string]string{
 				"app": r.nodeID,
 			},
@@ -316,11 +363,10 @@ func (r *ResourceManager) renderService() *corev1.Service {
 func (r *ResourceManager) renderServiceAccount() *corev1.ServiceAccount {
 	return &corev1.ServiceAccount{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      r.nodeID,
-			Namespace: r.namespace,
-			Labels: map[string]string{
-				constants.GatewayNameLabel: r.gw.Name,
-			},
+			Name:            r.nodeID,
+			Namespace:       r.namespace,
+			Labels:          r.getLabels(),
+			Annotations:     r.getAnnotations(),
 			OwnerReferences: ownerRef(r.gw),
 		},
 	}

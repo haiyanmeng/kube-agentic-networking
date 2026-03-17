@@ -124,5 +124,10 @@ func (s *Server) UpdateXDSServer(ctx context.Context, nodeid string, resources m
 		return fmt.Errorf("failed to update resource snapshot in management server: %v", err)
 	}
 	klog.V(4).Infof("Updated snapshot cache for node %s with version %d", nodeid, version)
+	for typeURL, resList := range resources {
+		for _, res := range resList {
+			klog.V(5).Infof("Node %s, Type %s, Resource: %v", nodeid, typeURL, res)
+		}
+	}
 	return nil
 }

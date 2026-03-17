@@ -27,6 +27,8 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 	"google.golang.org/protobuf/types/known/durationpb"
 	corev1 "k8s.io/api/core/v1"
+	corev1listers "k8s.io/client-go/listers/core/v1"
+	"k8s.io/klog/v2"
 
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -124,7 +126,7 @@ func (t *Translator) fetchServiceBackend(routeNamespace string, backendRef gatew
 		ns = string(*backendRef.Namespace)
 	}
 	if t.referenceGrantLister != nil && ns != routeNamespace {
-		if !AllowedByReferenceGrant(routeNamespace, ns, t.referenceGrantLister) {
+		if !AllowedByReferenceGrant(routeNamespace, "gateway.networking.k8s.io", "HTTPRoute", ns, "", "Service", string(backendRef.Name), t.referenceGrantLister) {
 			return nil, &ControllerError{
 				Reason:  string(gatewayv1.RouteReasonRefNotPermitted),
 				Message: fmt.Sprintf("cross-namespace reference to Service %s/%s not permitted by ReferenceGrant", ns, backendRef.Name),
@@ -207,7 +209,7 @@ func convertBackendToCluster(backend *agenticv0alpha0.XBackend) (*clusterv3.Clus
 }
 
 // buildClustersFromRouteBackends builds Envoy clusters from a mix of XBackend and direct Service refs.
-func buildClustersFromRouteBackends(backends []*routeBackend) ([]*clusterv3.Cluster, error) {
+func buildClustersFromRouteBackends(backends []*routeBackend, serviceLister corev1listers.ServiceLister) ([]*clusterv3.Cluster, error) {
 	var clusters []*clusterv3.Cluster
 	for _, rb := range backends {
 		var cluster *clusterv3.Cluster
@@ -215,7 +217,17 @@ func buildClustersFromRouteBackends(backends []*routeBackend) ([]*clusterv3.Clus
 		if rb.xbackend != nil {
 			cluster, err = convertBackendToCluster(rb.xbackend)
 		} else {
-			cluster = convertServiceRefToCluster(rb.svcNS, rb.svcName, rb.svcPort)
+			var clusterIP string
+			if serviceLister != nil {
+				svc, err := serviceLister.Services(rb.svcNS).Get(rb.svcName)
+				if err == nil {
+					clusterIP = svc.Spec.ClusterIP
+					klog.Infof("Using ClusterIP %s for Service %s/%s", clusterIP, rb.svcNS, rb.svcName)
+				} else {
+					klog.V(2).Infof("failed to get service %s/%s from lister, fallback to FQDN: %v", rb.svcNS, rb.svcName, err)
+				}
+			}
+			cluster = convertServiceRefToCluster(rb.svcNS, rb.svcName, rb.svcPort, clusterIP)
 		}
 		if err != nil {
 			return nil, err
@@ -225,15 +237,28 @@ func buildClustersFromRouteBackends(backends []*routeBackend) ([]*clusterv3.Clus
 	return clusters, nil
 }
 
-func convertServiceRefToCluster(ns, name string, port int32) *clusterv3.Cluster {
+func convertServiceRefToCluster(ns, name string, port int32, clusterIP string) *clusterv3.Cluster {
 	clusterName := fmt.Sprintf(constants.ClusterNameFormat, ns, name)
-	serviceFQDN := fmt.Sprintf("%s.%s.svc.cluster.local", name, ns)
-	cluster := &clusterv3.Cluster{
-		Name:                 clusterName,
-		ConnectTimeout:       durationpb.New(defaultConnectTimeout),
-		ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STRICT_DNS},
-		//nolint:gosec // G115: port values are within valid uint32 bounds
-		LoadAssignment: createClusterLoadAssignment(clusterName, serviceFQDN, uint32(port)),
+	var cluster *clusterv3.Cluster
+	if clusterIP != "" && clusterIP != "None" {
+		klog.Infof("Creating STATIC cluster for Service %s/%s with IP %s", ns, name, clusterIP)
+		cluster = &clusterv3.Cluster{
+			Name:                 clusterName,
+			ConnectTimeout:       durationpb.New(defaultConnectTimeout),
+			ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STATIC},
+			//nolint:gosec // G115: port values are within valid uint32 bounds
+			LoadAssignment: createClusterLoadAssignment(clusterName, clusterIP, uint32(port)),
+		}
+	} else {
+		serviceFQDN := fmt.Sprintf("%s.%s.svc.cluster.local", name, ns)
+		klog.Infof("Creating STRICT_DNS cluster for Service %s/%s with FQDN %s", ns, name, serviceFQDN)
+		cluster = &clusterv3.Cluster{
+			Name:                 clusterName,
+			ConnectTimeout:       durationpb.New(defaultConnectTimeout),
+			ClusterDiscoveryType: &clusterv3.Cluster_Type{Type: clusterv3.Cluster_STRICT_DNS},
+			//nolint:gosec // G115: port values are within valid uint32 bounds
+			LoadAssignment: createClusterLoadAssignment(clusterName, serviceFQDN, uint32(port)),
+		}
 	}
 	return cluster
 }

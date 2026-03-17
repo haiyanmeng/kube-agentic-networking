@@ -20,15 +20,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
-	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
 
@@ -80,11 +79,12 @@ func (r *ResourceManager) EnsureProxyExist(ctx context.Context) (string, error) 
 		return "", err
 	}
 
-	if err := r.ensureConfigMap(ctx); err != nil {
+	hash, err := r.ensureConfigMap(ctx)
+	if err != nil {
 		return "", err
 	}
 
-	if err := r.ensureDeployment(ctx); err != nil {
+	if err := r.ensureDeployment(ctx, hash); err != nil {
 		return "", err
 	}
 
@@ -114,50 +114,76 @@ func (r *ResourceManager) ensureSA(ctx context.Context) error {
 	return nil
 }
 
-func (r *ResourceManager) ensureConfigMap(ctx context.Context) error {
+func (r *ResourceManager) ensureConfigMap(ctx context.Context) (string, error) {
 	logger := klog.FromContext(ctx)
-	cm, err := r.renderConfigMap()
+	cm, err := r.renderConfigMap(ctx)
 	if err != nil {
-		return err
+		return "", err
 	}
 
-	_, err = r.client.CoreV1().ConfigMaps(cm.Namespace).Get(ctx, cm.Name, metav1.GetOptions{})
+	existingCM, err := r.client.CoreV1().ConfigMaps(cm.Namespace).Get(ctx, cm.Name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
 			_, err = r.client.CoreV1().ConfigMaps(cm.Namespace).Create(ctx, cm, metav1.CreateOptions{})
 			if err != nil {
-				return fmt.Errorf("failed to create envoy configmap: %w", err)
+				return "", fmt.Errorf("failed to create envoy configmap: %w", err)
 			}
 		} else {
-			return fmt.Errorf("failed to get envoy configmap: %w", err)
+			return "", fmt.Errorf("failed to get envoy configmap: %w", err)
+		}
+	} else {
+		existingCM.Data = cm.Data
+		_, err = r.client.CoreV1().ConfigMaps(cm.Namespace).Update(ctx, existingCM, metav1.UpdateOptions{})
+		if err != nil {
+			return "", fmt.Errorf("failed to update envoy configmap: %w", err)
 		}
 	}
 
-	logger.Info("Envoy bootstrap configmap is ready!")
-	return nil
+	dataJSON, err := json.Marshal(cm.Data)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal configmap data: %w", err)
+	}
+	hash := sha256.Sum256(dataJSON)
+	hashStr := hex.EncodeToString(hash[:])
+
+	logger.Info("Envoy bootstrap configmap is ready!", "hash", hashStr)
+	return hashStr, nil
 }
 
-func (r *ResourceManager) ensureDeployment(ctx context.Context) error {
+func (r *ResourceManager) ensureDeployment(ctx context.Context, configHash string) error {
 	logger := klog.FromContext(ctx)
 
-	deployment := r.renderDeployment()
-	_, err := r.client.AppsV1().Deployments(deployment.Namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
+	deployment := r.renderDeployment(configHash)
+	dep, err := r.client.AppsV1().Deployments(deployment.Namespace).Get(ctx, deployment.Name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
-			_, err = r.client.AppsV1().Deployments(deployment.Namespace).Create(ctx, deployment, metav1.CreateOptions{})
+			dep, err = r.client.AppsV1().Deployments(deployment.Namespace).Create(ctx, deployment, metav1.CreateOptions{})
 			if err != nil {
 				return fmt.Errorf("failed to create envoy deployment: %w", err)
 			}
 		} else {
 			return fmt.Errorf("failed to get envoy deployment: %w", err)
 		}
+	} else {
+		// Update existing deployment to pick up changes (e.g. config hash)
+		if dep.Spec.Template.ObjectMeta.Annotations == nil {
+			dep.Spec.Template.ObjectMeta.Annotations = map[string]string{}
+		}
+		dep.Spec.Template.ObjectMeta.Annotations["checksum/config"] = configHash
+		_, err = r.client.AppsV1().Deployments(deployment.Namespace).Update(ctx, dep, metav1.UpdateOptions{})
+		if err != nil {
+			return fmt.Errorf("failed to update envoy deployment: %w", err)
+		}
 	}
 
-	if err := waitForDeploymentAvailable(ctx, r.client, deployment.Namespace, deployment.Name); err != nil {
-		return err
+	for _, cond := range dep.Status.Conditions {
+		if cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionTrue {
+			logger.Info("Envoy proxy deployment is ready!")
+			return nil
+		}
 	}
-	logger.Info("Envoy proxy deployment is ready!")
-	return nil
+
+	return fmt.Errorf("envoy deployment %s is not available yet", deployment.Name)
 }
 
 func (r *ResourceManager) ensureService(ctx context.Context) (string, error) {
@@ -175,60 +201,27 @@ func (r *ResourceManager) ensureService(ctx context.Context) (string, error) {
 		}
 	}
 
-	if errWait := waitForServiceReady(ctx, r.client, service.Namespace, service.Name); errWait != nil {
-		return "", errWait
-	}
-	logger.Info("Envoy proxy service is ready!")
-
-	// Refresh the service object to get the assigned ClusterIP if it was just created.
-	if svc.Spec.ClusterIP == "" {
-		svc, err = r.client.CoreV1().Services(service.Namespace).Get(ctx, service.Name, metav1.GetOptions{})
-		if err != nil {
-			return "", fmt.Errorf("failed to refresh envoy service: %w", err)
-		}
-	}
-
-	return svc.Spec.ClusterIP, nil
-}
-
-func waitForServiceReady(ctx context.Context, client kubernetes.Interface, namespace, name string) error {
-	logger := klog.FromContext(ctx)
-	logger.Info("Waiting for envoy service to be ready...")
-	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 1*time.Minute, true, func(ctx context.Context) (bool, error) {
-		svc, err := client.CoreV1().Services(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return false, err
-		}
-		if svc.Spec.ClusterIP != "" {
-			return true, nil
-		}
-		return false, nil
-	})
+	svc, err = r.client.CoreV1().Services(service.Namespace).Get(ctx, service.Name, metav1.GetOptions{})
 	if err != nil {
-		return fmt.Errorf("waiting for envoy service %s to be ready: %w", name, err)
+		return "", fmt.Errorf("failed to refresh envoy service: %w", err)
 	}
-	return nil
-}
 
-func waitForDeploymentAvailable(ctx context.Context, client kubernetes.Interface, namespace, name string) error {
-	logger := klog.FromContext(ctx)
-	logger.Info("Waiting for envoy deployment to be available...")
-	err := wait.PollUntilContextTimeout(ctx, 2*time.Second, 1*time.Minute, true, func(ctx context.Context) (bool, error) {
-		dep, err := client.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return false, err
-		}
-		for _, cond := range dep.Status.Conditions {
-			if cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionTrue {
-				return true, nil
+	if svc.Spec.Type == corev1.ServiceTypeLoadBalancer {
+		if len(svc.Status.LoadBalancer.Ingress) > 0 {
+			if svc.Status.LoadBalancer.Ingress[0].IP != "" {
+				logger.Info("Envoy proxy service is ready with LoadBalancer IP!")
+				return svc.Status.LoadBalancer.Ingress[0].IP, nil
 			}
 		}
-		return false, nil
-	})
-	if err != nil {
-		return fmt.Errorf("waiting for envoy deployment %s to be available: %w", name, err)
+		return "", fmt.Errorf("loadbalancer IP is not assigned yet for service %s", service.Name)
 	}
-	return nil
+
+	if svc.Spec.ClusterIP == "" {
+		return "", fmt.Errorf("envoy service %s is not ready yet", service.Name)
+	}
+
+	logger.Info("Envoy proxy service is ready with ClusterIP!")
+	return svc.Spec.ClusterIP, nil
 }
 
 func DeleteProxy(ctx context.Context, client kubernetes.Interface, namespace, name string) error {

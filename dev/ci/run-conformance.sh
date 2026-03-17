@@ -19,8 +19,8 @@ set -o nounset
 set -o pipefail
 
 # Configuration
-CLUSTER_NAME="kan-e2e"
-E2E_NAMESPACE="e2e-test-ns"
+CLUSTER_NAME="kan-conformance"
+CONFORMANCE_NAMESPACE="gateway-conformance-infra"
 SYSTEM_NAMESPACE="agentic-net-system"
 
 # Find the repository root
@@ -38,13 +38,24 @@ main() {
   
   build_and_load_controller_image "${CLUSTER_NAME}" "${registry}" "${image_name}" "${tag}"
   
+  header "Pre-loading Envoy image"
+  docker pull envoyproxy/envoy:v1.36-latest
+  kind load docker-image envoyproxy/envoy:v1.36-latest --name "${CLUSTER_NAME}"
+  
   install_crds
   setup_agentic_identity "${SYSTEM_NAMESPACE}"
   deploy_controller "${tag}" "${SYSTEM_NAMESPACE}"
 
-  header "Running E2E tests"
+  header "Running Conformance tests"
   # Requirements: K8s v1.35+, PodCertificateRequest/ClusterTrustBundle enabled, and KAN Controller running with --enable-agentic-identity-signer=true.
-  cd tests && go clean -testcache && go test -v -parallel=2 ./e2e/...
+  cd tests && go clean -testcache
+  
+  local test_args=(-mod=mod -tags conformance -v ./conformance/... -gateway-class=kube-agentic-networking -cleanup-base-resources=false)
+  if [ -n "${RUN_TEST:-}" ]; then
+    test_args+=(-run-test="$RUN_TEST")
+  fi
+  
+  GOWORK=off CGO_ENABLED=0 go test "${test_args[@]}"
 }
 
 # Function to print a prominent header
@@ -75,35 +86,35 @@ cleanup() {
     header "Controller logs (last 200 lines)"
     kubectl logs deployment/agentic-net-controller -n "${SYSTEM_NAMESPACE}" --all-containers --tail=200 || true
 
-    header "E2E Test Namespace Resources"
-    kubectl get all -n "${E2E_NAMESPACE}" || true
+    header "Conformance Test Namespace Resources"
+    kubectl get all -n "${CONFORMANCE_NAMESPACE}" || true
 
     header "Gateway Resources"
-    kubectl get gateway -n "${E2E_NAMESPACE}" -o yaml || true
+    kubectl get gateway -n "${CONFORMANCE_NAMESPACE}" -o yaml || true
 
     header "Access Policies"
-    kubectl get xaccesspolicies -n "${E2E_NAMESPACE}" || true
+    kubectl get xaccesspolicies -n "${CONFORMANCE_NAMESPACE}" || true
 
     header "Backend Resources"
-    kubectl get xbackends -n "${E2E_NAMESPACE}" || true
+    kubectl get xbackends -n "${CONFORMANCE_NAMESPACE}" || true
 
-    header "Pods in E2E namespace"
-    kubectl get pods -n "${E2E_NAMESPACE}" -o wide || true
+    header "Pods in Conformance namespace"
+    kubectl get pods -n "${CONFORMANCE_NAMESPACE}" -o wide || true
 
     header "Pod Certificate Requests"
-    kubectl get podcertificaterequests -n "${E2E_NAMESPACE}" -o yaml || true
+    kubectl get podcertificaterequests -n "${CONFORMANCE_NAMESPACE}" -o yaml || true
 
     header "Cluster Trust Bundles"
     kubectl get clustertrustbundles || true
 
     header "Tester Pod YAML"
-    kubectl get pod e2e-tester -n "${E2E_NAMESPACE}" -o yaml || true
+    kubectl get pod conformance-tester -n "${CONFORMANCE_NAMESPACE}" -o yaml || true
 
     header "MCP Server Logs"
-    kubectl logs -n "${E2E_NAMESPACE}" -l app=mcp-everything --tail=100 || true
+    kubectl logs -n "${CONFORMANCE_NAMESPACE}" -l app=mcp-everything --tail=100 || true
 
     header "Envoy Proxy Logs"
-    kubectl logs -n "${E2E_NAMESPACE}" -l "kube-agentic-networking.sigs.k8s.io/gateway-name=e2e-gateway" --all-containers --tail=100 || true
+    kubectl logs -n "${CONFORMANCE_NAMESPACE}" -l "gateway.networking.k8s.io/gateway-name" --all-containers --tail=100 || true
   fi
   exit "${status}"
 }
