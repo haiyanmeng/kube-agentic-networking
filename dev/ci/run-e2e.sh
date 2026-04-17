@@ -34,6 +34,44 @@ main() {
   kind delete cluster --name "${CLUSTER_NAME}" || true
   kind create cluster --name "${CLUSTER_NAME}" --config dev/ci/kind-config.yaml --wait 5m
 
+  header "Installing MetalLB"
+  local metallb_version="v0.13.10"
+  kubectl apply -f https://raw.githubusercontent.com/metallb/metallb/"${metallb_version}"/config/manifests/metallb-native.yaml
+
+  needCreate="$(kubectl get secret -n metallb-system memberlist --no-headers --ignore-not-found -o custom-columns=NAME:.metadata.name)"
+  if [ -z "$needCreate" ]; then
+      kubectl create secret generic -n metallb-system memberlist --from-literal=secretkey="$(openssl rand -base64 128)"
+  fi
+
+  # Wait for MetalLB to become available
+  kubectl rollout status -n metallb-system deployment/controller --timeout 5m
+  kubectl rollout status -n metallb-system daemonset/speaker --timeout 5m
+
+  # Apply config with addresses based on docker network IPAM
+  subnet=$(docker network inspect kind | jq -r '.[].IPAM.Config[].Subnet | select(contains(":") | not)')
+  address_first_three_octets=$(echo "${subnet}" | awk -F. '{printf "%s.%s.%s",$1,$2,$3}')
+  address_range="${address_first_three_octets}.200-${address_first_three_octets}.250"
+
+  kubectl apply -f - <<EOF
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  namespace: metallb-system
+  name: kube-services
+spec:
+  addresses:
+  - ${address_range}
+---
+apiVersion: metallb.io/v1beta1
+kind: L2Advertisement
+metadata:
+  name: kube-services
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+  - kube-services
+EOF
+
   header "Building controller image"
   # These must match the image used in k8s/deploy/deployment.yaml
   REGISTRY="us-central1-docker.pkg.dev/k8s-staging-images/agentic-net"
