@@ -186,4 +186,6 @@ func setGatewayConditions(newGw *gatewayv1.Gateway, listenerStatuses []gatewayv1
 		Message:            "Gateway is accepted",
 		ObservedGeneration: newGw.Generation,
 	})
+
+	newGw.Status.Listeners = listenerStatuses
 }

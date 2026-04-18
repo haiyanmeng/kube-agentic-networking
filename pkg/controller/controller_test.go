@@ -36,6 +36,7 @@ import (
 	agenticv0alpha0 "sigs.k8s.io/kube-agentic-networking/api/v0alpha0"
 	agenticlisters "sigs.k8s.io/kube-agentic-networking/k8s/client/listers/api/v0alpha0"
 	"sigs.k8s.io/kube-agentic-networking/pkg/constants"
+	"sigs.k8s.io/kube-agentic-networking/pkg/translator"
 )
 
 func TestHasHTTPRoutesReferencingGateway(t *testing.T) {
@@ -391,12 +392,12 @@ func TestSyncGateway_EnsureProxyExistError(t *testing.T) {
 
 	gwIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc})
 	if err := gwIndexer.Add(gw); err != nil {
-		t.Fatalf("gwIndexer.Add() = %v, want nil", err)
+		t.Fatalf("indexer.Add: %v", err)
 	}
 
 	gwcIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
 	if err := gwcIndexer.Add(gwc); err != nil {
-		t.Fatalf("gwcIndexer.Add() = %v, want nil", err)
+		t.Fatalf("indexer.Add: %v", err)
 	}
 
 	fakeK8sClient := fake.NewClientset()
@@ -420,10 +421,33 @@ func TestSyncGateway_EnsureProxyExistError(t *testing.T) {
 		},
 		gatewayqueue: queue,
 	}
+	httpRouteIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	accessPolicyIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	backendIndexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+	c.translator = translator.New(
+		"cluster.local",
+		fakeK8sClient,
+		fakeGwClient,
+		nil, // nsLister
+		nil, // svcLister
+		nil, // secretLister
+		gatewaylisters.NewGatewayLister(gwIndexer),
+		gatewaylisters.NewHTTPRouteLister(httpRouteIndexer),
+		nil, // referenceGrantLister
+		agenticlisters.NewXAccessPolicyLister(accessPolicyIndexer),
+		agenticlisters.NewXBackendLister(backendIndexer),
+	)
 
 	err := c.syncGateway(context.Background(), gwNamespace+"/"+gwName)
-	if err == nil {
-		t.Fatal("syncGateway() = nil, want error")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if queue.addedAfter != gwNamespace+"/"+gwName {
+		t.Errorf("expected item %q to be added to queue, got %q", gwNamespace+"/"+gwName, queue.addedAfter)
+	}
+	if queue.delay != 2*time.Second {
+		t.Errorf("expected delay %v, got %v", 2*time.Second, queue.delay)
 	}
 
 	// Verify status was updated with error!
@@ -436,6 +460,6 @@ func TestSyncGateway_EnsureProxyExistError(t *testing.T) {
 		}
 	}
 	if !foundUpdateStatus {
-		t.Error("foundUpdateStatus = false, want true")
+		t.Error("expected gateway status update action, but none found")
 	}
 }

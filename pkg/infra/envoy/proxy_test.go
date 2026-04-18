@@ -40,9 +40,12 @@ func TestEnsureDeployment(t *testing.T) {
 		client := fake.NewClientset()
 		rm := NewResourceManager(client, gw, "envoy-image", "cluster.local")
 
-		err := rm.ensureDeployment(context.Background())
+		err := rm.ensureDeployment(context.Background(), "dummy-hash")
 		if err == nil {
 			t.Fatal("expected error as deployment is not available yet")
+		}
+		if err.Error() != "envoy deployment "+nodeID+" is not available yet" {
+			t.Errorf("unexpected error: %v", err)
 		}
 
 		// Verify deployment was created
@@ -70,7 +73,7 @@ func TestEnsureDeployment(t *testing.T) {
 		client := fake.NewClientset(dep)
 		rm := NewResourceManager(client, gw, "envoy-image", "cluster.local")
 
-		err := rm.ensureDeployment(context.Background())
+		err := rm.ensureDeployment(context.Background(), "dummy-hash")
 		if err == nil {
 			t.Fatal("expected error as deployment is not available")
 		}
@@ -94,7 +97,7 @@ func TestEnsureDeployment(t *testing.T) {
 		client := fake.NewClientset(dep)
 		rm := NewResourceManager(client, gw, "envoy-image", "cluster.local")
 
-		err := rm.ensureDeployment(context.Background())
+		err := rm.ensureDeployment(context.Background(), "dummy-hash")
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -170,7 +173,7 @@ func TestEnsureService(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if ip != "10.0.0.1" {
-			t.Errorf("ensureService() = %s, want %s", ip, "10.0.0.1")
+			t.Errorf("expected IP 10.0.0.1, got %s", ip)
 		}
 	})
 

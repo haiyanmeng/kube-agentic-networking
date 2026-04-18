@@ -17,6 +17,7 @@ limitations under the License.
 package envoy
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -25,6 +26,7 @@ import (
 
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
+	"k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/kube-agentic-networking/pkg/constants"
 	"sigs.k8s.io/kube-agentic-networking/pkg/infra/agentidentity/agenticidentitysigner"
 )
@@ -36,9 +38,10 @@ func TestRenderConfigMap(t *testing.T) {
 			Namespace: "test-ns",
 		},
 	}
-	rm := NewResourceManager(nil, gw, "envoy-image", "cluster.local")
+	client := fake.NewClientset()
+	rm := NewResourceManager(client, gw, "envoy-image", "cluster.local")
 
-	cm, err := rm.renderConfigMap()
+	cm, err := rm.renderConfigMap(context.Background())
 	if err != nil {
 		t.Fatalf("failed to render ConfigMap: %v", err)
 	}
@@ -79,7 +82,7 @@ func TestRenderDeployment(t *testing.T) {
 	trustDomain := "test.cluster"
 	rm := NewResourceManager(nil, gw, "envoy-image", trustDomain)
 
-	dep := rm.renderDeployment()
+	dep := rm.renderDeployment("dummy-hash")
 
 	// Verify Identification Labels
 	if dep.Labels[constants.GatewayNameLabel] != gw.Name {
@@ -288,7 +291,7 @@ func TestRenderWithInfrastructureLabelsAndAnnotations(t *testing.T) {
 	rm := NewResourceManager(nil, gw, "envoy-image", "cluster.local")
 
 	// Test Deployment
-	dep := rm.renderDeployment()
+	dep := rm.renderDeployment("dummy-hash")
 	if dep.Labels["custom-label"] != "custom-value" {
 		t.Errorf("Deployment missing custom label")
 	}
@@ -351,7 +354,8 @@ func TestGetLabels(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := getLabels(tc.gwName, tc.infraLabels)
+			rm := &ResourceManager{gw: &gatewayv1.Gateway{ObjectMeta: metav1.ObjectMeta{Name: tc.gwName}, Spec: gatewayv1.GatewaySpec{Infrastructure: &gatewayv1.GatewayInfrastructure{Labels: tc.infraLabels}}}}
+			result := rm.getLabels()
 			if len(result) != len(tc.expected) {
 				t.Fatalf("expected %d labels, got %d", len(tc.expected), len(result))
 			}
@@ -382,22 +386,20 @@ func TestGetAnnotations(t *testing.T) {
 		{
 			name:             "empty infra annotations",
 			infraAnnotations: nil,
-			expected:         map[string]string{},
+			expected:         nil,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result := getAnnotations(tc.infraAnnotations)
-			if result == nil {
-				t.Errorf("getAnnotations() = nil, want non-nil map")
-			}
+			rm := &ResourceManager{gw: &gatewayv1.Gateway{Spec: gatewayv1.GatewaySpec{Infrastructure: &gatewayv1.GatewayInfrastructure{Annotations: tc.infraAnnotations}}}}
+			result := rm.getAnnotations()
 			if len(result) != len(tc.expected) {
-				t.Fatalf("len(getAnnotations()) = %d, want %d", len(result), len(tc.expected))
+				t.Fatalf("expected length %d, got %d", len(tc.expected), len(result))
 			}
 			for k, v := range tc.expected {
 				if result[k] != v {
-					t.Errorf("getAnnotations()[%s] = %s, want %s", k, result[k], v)
+					t.Errorf("annotation mismatch for key %s: got %s, want %s", k, result[k], v)
 				}
 			}
 		})

@@ -409,12 +409,25 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 
 	newGW := gateway.DeepCopy()
 
+	// Translate Gateway to xDS resources (includes only current HTTPRoutes/XAccessPolicies; stale rules are omitted).
+	// We do this before EnsureProxyExist so that we can populate listener statuses in the Gateway status
+	// even if proxy creation is pending or fails (e.g. waiting for LoadBalancer IP).
+	resources, listenerStatuses, httpRouteStatuses, _, err := c.translator.TranslateGatewayToXDS(ctx, gateway)
+	if err != nil {
+		return updateGatewayStatus(ctx, c, gateway, newGW, listenerStatuses, fmt.Errorf("failed to translate gateway to xDS resources: %w", err))
+	}
+
+	logger.Info("Translated gateway to xDS resources")
+
 	// Ensure Envoy proxy deployment and service exist.
 	rm := envoy.NewResourceManager(c.core.client, gateway, c.envoyImage, c.agenticIdentityTrustDomain)
 	proxyAddress, err := rm.EnsureProxyExist(ctx)
 	if err != nil {
-		updateErr := updateGatewayStatus(ctx, c, gateway, newGW, nil, err)
-		return errors.Join(err, updateErr)
+		_ = updateGatewayStatus(ctx, c, gateway, newGW, listenerStatuses, err)
+		// Requeue after a fixed delay to retry quickly (e.g. waiting for LoadBalancer IP)
+		// and avoid the worker's exponential backoff rate limiting.
+		c.gatewayqueue.AddAfter(key, 2*time.Second)
+		return nil
 	}
 
 	// TODO: Add support for IPv6?
@@ -437,21 +450,17 @@ func (c *Controller) syncGateway(ctx context.Context, key string) error {
 
 	logger.Info("Ensured Envoy proxy for gateway exists", "nodeID", rm.NodeID(), "proxyAddress", proxyAddress)
 
-	// Translate Gateway to xDS resources (includes only current HTTPRoutes/XAccessPolicies; stale rules are omitted).
-	resources, listenerStatuses, httpRouteStatuses, _, err := c.translator.TranslateGatewayToXDS(ctx, gateway)
-	if err != nil {
-		updateErr := updateGatewayStatus(ctx, c, gateway, newGW, nil, fmt.Errorf("failed to translate gateway to xDS resources: %w", err))
-		return errors.Join(err, updateErr)
-	}
-
-	logger.Info("Translated gateway to xDS resources")
-
-	newGW.Status.Listeners = listenerStatuses
 	// Update the xDS server with the new resources.
 	xdsErr := c.xdsServer.UpdateXDSServer(ctx, rm.NodeID(), resources)
-	updateGatewayStatusErr := updateGatewayStatus(ctx, c, gateway, newGW, listenerStatuses, xdsErr)
-	updateHTTPRouteStatusErr := c.updateHTTPRouteStatuses(ctx, httpRouteStatuses)
-	return errors.Join(xdsErr, updateGatewayStatusErr, updateHTTPRouteStatusErr)
+
+	var errs []error
+	if err := updateGatewayStatus(ctx, c, gateway, newGW, listenerStatuses, xdsErr); err != nil {
+		errs = append(errs, err)
+	}
+	if err := c.updateHTTPRouteStatuses(ctx, httpRouteStatuses); err != nil {
+		errs = append(errs, err)
+	}
+	return errors.Join(errs...)
 }
 
 func (c *Controller) updateGatewayRemoveFinalizer(ctx context.Context, namespace, name string) error {
@@ -474,19 +483,27 @@ func (c *Controller) updateGatewayRemoveFinalizer(ctx context.Context, namespace
 
 // updateGatewayStatus updates the Gateway status in the API server if it has changed.
 // Note: this function modifies newGW.
+// It returns the original syncErr if it is non-nil. If syncErr is nil and the status
+// update fails, it returns the status update error.
 func updateGatewayStatus(ctx context.Context, c *Controller, gateway *gatewayv1.Gateway, newGW *gatewayv1.Gateway, listenerStatuses []gatewayv1.ListenerStatus, syncErr error) error {
 	setGatewayConditions(newGW, listenerStatuses, syncErr)
 
 	if reflect.DeepEqual(gateway.Status, newGW.Status) {
-		return nil
+		return syncErr
 	}
 
 	if _, statusErr := c.gateway.client.GatewayV1().Gateways(newGW.Namespace).UpdateStatus(ctx, newGW, metav1.UpdateOptions{}); statusErr != nil {
-		klog.FromContext(ctx).Error(statusErr, "failed to update gateway status")
-		return fmt.Errorf("failed to update gateway status: %w", statusErr)
+		klog.Errorf("Failed to update gateway status: %v", statusErr)
+		// If syncErr is nil, return the status update error to trigger a requeue.
+		// If syncErr is not nil, we return it instead to avoid masking the primary
+		// failure that caused the reconciliation to fail.
+		if syncErr == nil {
+			return statusErr
+		}
+	} else {
+		klog.FromContext(ctx).Info("Updated gateway status")
 	}
-	klog.FromContext(ctx).Info("Updated gateway status")
-	return nil
+	return syncErr
 }
 
 // ensureGatewayFinalizer adds the controller finalizer via the API when missing.
