@@ -40,6 +40,7 @@ import (
 	"google.golang.org/protobuf/types/known/durationpb"
 	"google.golang.org/protobuf/types/known/structpb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -146,13 +147,80 @@ func (t *Translator) validateListeners(gateway *gatewayv1.Gateway) map[gatewayv1
 			continue
 		}
 
-		setListenerCondition(listenerConditions, listener.Name, metav1.Condition{
-			Type:               string(gatewayv1.ListenerConditionResolvedRefs),
-			Status:             metav1.ConditionTrue,
-			Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
-			Message:            "All references resolved",
-			ObservedGeneration: gateway.Generation,
-		})
+		resolvedRefs := true
+		if listener.TLS != nil {
+			for _, ref := range listener.TLS.CertificateRefs {
+				group := ""
+				if ref.Group != nil {
+					group = string(*ref.Group)
+				}
+				kind := "Secret"
+				if ref.Kind != nil {
+					kind = string(*ref.Kind)
+				}
+
+				if (group == "" || group == "core") && kind == "Secret" {
+					ns := gateway.Namespace
+					if ref.Namespace != nil {
+						ns = string(*ref.Namespace)
+					}
+
+					// Check if secret exists
+					_, err := t.secretLister.Secrets(ns).Get(string(ref.Name))
+					if err != nil {
+						if apierrors.IsNotFound(err) {
+							setListenerCondition(listenerConditions, listener.Name, metav1.Condition{
+								Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+								Status:             metav1.ConditionFalse,
+								Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
+								Message:            fmt.Sprintf("Secret %s/%s not found", ns, ref.Name),
+								ObservedGeneration: gateway.Generation,
+							})
+							resolvedRefs = false
+							break
+						}
+						// For other errors, treat as unresolved for safety
+						setListenerCondition(listenerConditions, listener.Name, metav1.Condition{
+							Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+							Status:             metav1.ConditionFalse,
+							Reason:             string(gatewayv1.ListenerReasonInvalidCertificateRef),
+							Message:            fmt.Sprintf("Failed to get Secret %s/%s: %v", ns, ref.Name, err),
+							ObservedGeneration: gateway.Generation,
+						})
+						resolvedRefs = false
+						break
+					}
+
+					if ns != gateway.Namespace {
+						if !AllowedByReferenceGrant(
+							gateway.Namespace, "gateway.networking.k8s.io", "Gateway",
+							ns, "", "Secret", string(ref.Name),
+							t.referenceGrantLister,
+						) {
+							setListenerCondition(listenerConditions, listener.Name, metav1.Condition{
+								Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+								Status:             metav1.ConditionFalse,
+								Reason:             "RefNotPermitted",
+								Message:            fmt.Sprintf("Reference to Secret %s/%s not permitted by ReferenceGrant", ns, ref.Name),
+								ObservedGeneration: gateway.Generation,
+							})
+							resolvedRefs = false
+							break
+						}
+					}
+				}
+			}
+		}
+
+		if resolvedRefs {
+			setListenerCondition(listenerConditions, listener.Name, metav1.Condition{
+				Type:               string(gatewayv1.ListenerConditionResolvedRefs),
+				Status:             metav1.ConditionTrue,
+				Reason:             string(gatewayv1.ListenerReasonResolvedRefs),
+				Message:            "All references resolved",
+				ObservedGeneration: gateway.Generation,
+			})
+		}
 	}
 
 	return listenerConditions
