@@ -2,13 +2,13 @@
 apiVersion: agentic.prototype.x-k8s.io/v0alpha0
 kind: XAccessPolicy
 metadata:
-  name: auth-policy-remote-mcp
+  name: auth-policy-external-auth
   namespace: quickstart-ns
 spec:
   targetRefs:
-    - group: agentic.prototype.x-k8s.io
-      kind: XBackend
-      name: remote-mcp-backend
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: agentic-net-gateway
   rules:
     - name: ext-authorizer-for-adk-agent-sa
       source:
