@@ -1,0 +1,23 @@
+{
+  "folders": [
+    {
+      "path": "../..",
+    },
+    {
+      "path": "../../../gateway-api",
+    },
+    {
+      "path": "../../../../../../../agent-gateway",
+    },
+    {
+      "path": "../../../../../../../pod-snapshots",
+    },
+    {
+      "path": "../../../envoy-gateway",
+    },
+    {
+      "path": "../../../agent-sandbox",
+    },
+  ],
+  "settings": {},
+}

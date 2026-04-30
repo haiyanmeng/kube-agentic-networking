@@ -84,6 +84,12 @@ test-e2e: ## Run full E2E tests including cluster setup and controller deploymen
 	$(info ...Running full E2E pipeline (setup + test).)
 	./dev/ci/run-e2e.sh
 
+.PHONY: test-conformance
+test-conformance: ## Run full Conformance tests including cluster setup and controller deployment.
+	$(info ...Running full Conformance pipeline (setup + test).)
+	RUN_TEST="$(RUN_TEST)" ./dev/ci/run-conformance.sh
+
+
 .PHONY: verify
 verify: ## Run go vet
 	hack/verify-all.sh -v
@@ -225,9 +231,9 @@ dev-reload-controller: build ## Build and reload controller image into Kind clus
 	@echo "Updating Deployment in namespace: agentic-net-system..."
 	kubectl patch deployment agentic-net-controller -n agentic-net-system --type=json \
 		-p='[{"op": "replace", "path": "/spec/template/spec/containers/0/imagePullPolicy", "value": "IfNotPresent"}]'
-	
+
 	kubectl set image deployment/agentic-net-controller manager=$(REGISTRY)/$(IMAGE_NAME):$(TAG) -n agentic-net-system
-	
+
 	@echo "Restarting agentic-net-controller pods..."
 	kubectl rollout restart deployment/agentic-net-controller -n agentic-net-system
 

@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -82,10 +83,19 @@ func (r *ResourceManager) EnsureProxyExist(ctx context.Context) (string, error) 
 		return "", err
 	}
 
+	// 1. Create Service first to give MetalLB time to assign an IP
+	_, err := r.ensureService(ctx)
+	// Ignore the "not assigned yet" error on creation, but fail on other API errors
+	if err != nil && !strings.Contains(err.Error(), "loadbalancer address is not assigned yet") {
+		return "", err
+	}
+
+	// 2. Create Deployment
 	if err := r.ensureDeployment(ctx); err != nil {
 		return "", err
 	}
 
+	// 3. Get the Service address again (now it should be ready)
 	return r.ensureService(ctx)
 }
 
@@ -117,7 +127,7 @@ func (r *ResourceManager) ensureSA(ctx context.Context) error {
 // ensureConfigMap ensures that the ConfigMap for the Envoy proxy exists.
 func (r *ResourceManager) ensureConfigMap(ctx context.Context) error {
 	logger := klog.FromContext(ctx)
-	cm, err := r.renderConfigMap()
+	cm, err := r.renderConfigMap(ctx)
 	if err != nil {
 		return err
 	}

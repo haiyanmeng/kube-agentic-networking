@@ -17,11 +17,13 @@ limitations under the License.
 package envoy
 
 import (
+	"context"
 	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes/fake"
 
 	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 
@@ -36,9 +38,18 @@ func TestRenderConfigMap(t *testing.T) {
 			Namespace: "test-ns",
 		},
 	}
-	rm := NewResourceManager(nil, gw, "envoy-image", "cluster.local")
+	client := fake.NewSimpleClientset(&corev1.Service{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      constants.XDSServerServiceName,
+			Namespace: constants.AgenticNetSystemNamespace,
+		},
+		Spec: corev1.ServiceSpec{
+			ClusterIP: "10.96.0.10",
+		},
+	})
+	rm := NewResourceManager(client, gw, "envoy-image", "cluster.local")
 
-	cm, err := rm.renderConfigMap()
+	cm, err := rm.renderConfigMap(context.TODO())
 	if err != nil {
 		t.Fatalf("failed to render ConfigMap: %v", err)
 	}
