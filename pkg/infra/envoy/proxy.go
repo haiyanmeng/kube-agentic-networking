@@ -117,7 +117,7 @@ func (r *ResourceManager) ensureSA(ctx context.Context) error {
 // ensureConfigMap ensures that the ConfigMap for the Envoy proxy exists.
 func (r *ResourceManager) ensureConfigMap(ctx context.Context) error {
 	logger := klog.FromContext(ctx)
-	cm, err := r.renderConfigMap()
+	cm, err := r.renderConfigMap(ctx)
 	if err != nil {
 		return err
 	}

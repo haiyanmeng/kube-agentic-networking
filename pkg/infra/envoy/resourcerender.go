@@ -18,6 +18,7 @@ package envoy
 
 import (
 	"bytes"
+	"context"
 	_ "embed"
 	"fmt"
 	"sort"
@@ -65,7 +66,7 @@ type sdsConfigData struct {
 }
 
 // generateEnvoyBootstrapConfig returns an envoy config generated from config data
-func generateEnvoyBootstrapConfig(cluster, id string) (string, error) {
+func generateEnvoyBootstrapConfig(cluster, id, controlPlaneAddress string) (string, error) {
 	if cluster == "" || id == "" {
 		return "", fmt.Errorf("missing parameters for envoy config")
 	}
@@ -73,7 +74,7 @@ func generateEnvoyBootstrapConfig(cluster, id string) (string, error) {
 	data := &bootstrapConfigData{
 		Cluster:             cluster,
 		ID:                  id,
-		ControlPlaneAddress: fmt.Sprintf("%s.%s.svc.cluster.local", constants.XDSServerServiceName, constants.AgenticNetSystemNamespace),
+		ControlPlaneAddress: controlPlaneAddress,
 		ControlPlanePort:    15001,
 	}
 
@@ -133,11 +134,20 @@ func getAnnotations(infraAnnotations map[gatewayv1.AnnotationKey]gatewayv1.Annot
 }
 
 // renderConfigMap creates a ConfigMap for envoy bootstrap config and SDS configs.
-func (r *ResourceManager) renderConfigMap() (*corev1.ConfigMap, error) {
+func (r *ResourceManager) renderConfigMap(ctx context.Context) (*corev1.ConfigMap, error) {
+	svc, err := r.client.CoreV1().Services(constants.AgenticNetSystemNamespace).Get(ctx, constants.XDSServerServiceName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get XDS server service: %w", err)
+	}
+	controlPlaneAddress := svc.Spec.ClusterIP
+	if controlPlaneAddress == "" {
+		return nil, fmt.Errorf("XDS server service has no ClusterIP")
+	}
+
 	bootstrap, err := generateEnvoyBootstrapConfig(types.NamespacedName{
 		Namespace: r.gw.Namespace,
 		Name:      r.gw.Name,
-	}.String(), r.nodeID)
+	}.String(), r.nodeID, controlPlaneAddress)
 	if err != nil {
 		return nil, err
 	}
